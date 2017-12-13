@@ -538,12 +538,14 @@ namespace ts.Completions {
             return { codeActions: undefined, sourceDisplay: undefined };
         }
 
-        const { moduleSymbol, isDefaultExport } = symbolOriginInfo;
+        const { moduleSymbol } = symbolOriginInfo;
         const exportedSymbol = skipAlias(symbol.exportSymbol || symbol, checker);
-        const moduleSymbols = getAllReExportingModules(exportedSymbol, checker, allSourceFiles);
-        Debug.assert(contains(moduleSymbols, moduleSymbol));
+        const moduleSymbols = getAllReExportingModules(exportedSymbol, checker, allSourceFiles, symbolToOriginInfoMap); //but then they will all have different 'kind'!
+        Debug.assert(moduleSymbols.some(m => m.moduleSymbol === moduleSymbol));
 
-        const sourceDisplay = [textPart(first(codefix.getModuleSpecifiersForNewImport(program, sourceFile, moduleSymbols, compilerOptions, getCanonicalFileName, host)))];
+        //todo: have the fn in code fix handle first(x).moduleSpecifier
+        const sourceDisplay = [textPart(first(codefix.getModuleSpecifiersForNewImport(program, sourceFile, moduleSymbols, compilerOptions, getCanonicalFileName, host)).moduleSpecifier)];
+        //should only be one of these...
         const codeActions = codefix.getCodeActionsForImport(moduleSymbols, {
             host,
             program,
@@ -555,17 +557,20 @@ namespace ts.Completions {
             symbolName: getSymbolName(symbol, symbolOriginInfo, compilerOptions.target),
             getCanonicalFileName,
             symbolToken: undefined,
-            kind: isDefaultExport ? codefix.ImportKind.Default : codefix.ImportKind.Named,
         });
         return { sourceDisplay, codeActions };
     }
 
-    function getAllReExportingModules(exportedSymbol: Symbol, checker: TypeChecker, allSourceFiles: ReadonlyArray<SourceFile>): ReadonlyArray<Symbol> {
-        const result: Symbol[] = [];
-        codefix.forEachExternalModule(checker, allSourceFiles, module => {
-            for (const exported of checker.getExportsOfModule(module)) {
+    //maybe this should just be in importFixes.ts...
+    function getAllReExportingModules(exportedSymbol: Symbol, checker: TypeChecker, allSourceFiles: ReadonlyArray<SourceFile>, symbolToOriginInfoMap: SymbolOriginInfoMap): ReadonlyArray<codefix.Foo> {
+        const result: codefix.Foo[] = [];
+        codefix.forEachExternalModule(checker, allSourceFiles, moduleSymbol => {
+            for (const exported of checker.getExportsOfModule(moduleSymbol)) {
                 if (skipAlias(exported, checker) === exportedSymbol) {
-                    result.push(module);
+                    const isDefaultExport = symbolToOriginInfoMap[getSymbolId(exported)]!.isDefaultExport;
+                    Debug.assertEqual(isDefaultExport, checker.tryGetMemberInModuleExports(InternalSymbolName.Default, moduleSymbol) === exported); //if so, could remove that property from the map...
+                    //also get the importkind
+                    result.push({ moduleSymbol, importKind: isDefaultExport ? codefix.ImportKind.Default : codefix.ImportKind.Named });
                 }
             }
         });
@@ -1116,6 +1121,7 @@ namespace ts.Completions {
                     // Don't add a completion for a re-export, only for the original.
                     // If `symbol.parent !== moduleSymbol`, this comes from an `export * from "foo"` re-export. Those don't create new symbols.
                     // If `some(...)`, this comes from an `export { foo } from "foo"` re-export, which creates a new symbol (thus isn't caught by the first check).
+                    //(note: the import fix might *not* be for the original!) because we call `first(codefix.getModuleSpecifiersForNewImport`
                     if (symbol.parent !== moduleSymbol || some(symbol.declarations, d => isExportSpecifier(d) && !!d.parent.parent.moduleSpecifier)) {
                         continue;
                     }
